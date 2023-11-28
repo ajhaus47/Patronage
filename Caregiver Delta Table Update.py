@@ -191,15 +191,22 @@ CGDeltaTable.alias("master").merge(
 last_modification_time = sorted_files[-1].modificationTime
 date_today = datetime.datetime.now().date()
 number_of_upserts = len(files_to_process)
+upsert_rows = upsert_df.count()
 
 update_row = [
-    Row(date_today, last_modification_time, number_of_upserts)
+    Row(date_today, last_modification_time, number_of_upserts, upsert_rows)
 ]
-update_columns = ["run_date", "modification_time", "number_of_upserts"]
+update_columns = ["run_date", "modification_time", "number_of_upserts", "upsert_rows"]
 
 update_df = spark.createDataFrame(update_row).toDF(*update_columns)
 
 CGRunUpdateTable.alias("master").merge(update_df.alias("update"), "master.modification_time = update.modification_time").whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC
+# MAGIC select * from CGUpdateRuns_View
 
 # COMMAND ----------
 

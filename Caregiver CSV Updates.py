@@ -11,8 +11,8 @@
 
 # COMMAND ----------
 
-new_version = spark.read.format("delta").load("/mnt/Patronage/Caregivers_Staging@v1")
-old_version = spark.read.format("delta").load("/mnt/Patronage/Caregivers_Staging@v0")
+new_version = spark.read.format("delta").load("/mnt/Patronage/Caregivers_Staging@v3")
+old_version = spark.read.format("delta").load("/mnt/Patronage/Caregivers_Staging@v1")
 
 new_version.createOrReplaceTempView('new_version')
 old_version.createOrReplaceTempView('old_version')
@@ -46,9 +46,8 @@ import datetime
 date_today = datetime.datetime.now().date()
 
 updates.coalesce(1).write.format("com.databricks.spark.csv").option(
-    "header", "true",
-).save(f"dbfs:/FileStore/df/{str(date_today).replace('-', '')}PatronageCGChangeFile.csv")
-
-# COMMAND ----------
-
-
+    "header",
+    "true",
+).save(
+    f"dbfs:/FileStore/df/{str(date_today).replace('-', '')}PatronageCGChangeFile.csv"
+)
