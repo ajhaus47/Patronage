@@ -10,10 +10,10 @@ pip install openpyxl
 # COMMAND ----------
 
 import pandas as pd
-import datetime
+from datetime import datetime, timezone
 from delta.tables import *
 from pyspark.sql.types import *
-from pyspark.sql.functions import lit, col, current_timestamp, current_date
+from pyspark.sql.functions import lit, col, current_timestamp, current_date, max
 
 # COMMAND ----------
 
@@ -47,8 +47,21 @@ def pandas_to_spark(pandas_df):
 
 # COMMAND ----------
 
-person_site_associations_5667 = spark.sql("SELECT * FROM default.person_site_associations_5667 WHERE (ActiveMergedIdentifier = 'Active'  or ActiveMergedIdentifier is null)")
+person_site_associations_5667 = (
+    spark.read.parquet("/mnt/ci-mvi/Processed/SVeteran.SMVIPersonSiteAssociation/")
+    .filter(col("MVITreatingFacilityInstitutionSID") == 5667)
+    .select("EDIPI", "MVIPersonICN", "calc_IngestionTimestamp")
+    .groupBy("EDIPI", "MVIPersonICN")
+    .agg(max("calc_IngestionTimestamp").alias('IngestionTimeStamp'))
+)
+
 person_site_associations_5667.createOrReplaceTempView("person_site_associations_5667")
+
+final_edipi = spark.sql(
+    "select EDIPI, MVIPersonICN, IngestionTimeStamp, RANK() OVER (PARTITION BY EDIPI ORDER BY IngestionTimeStamp desc) as rank from person_site_associations_5667"
+)
+
+final_edipi.createOrReplaceTempView("final_edipi")
 
 # COMMAND ----------
 
@@ -79,7 +92,7 @@ if DeltaTable.isDeltaTable(spark, "/mnt/Patronage/Caregivers_Staging") is False:
     df_CareGivers.createOrReplaceTempView("Caregivers")
 
     Caregivers = spark.sql(
-        "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date from CareGivers cg left join person_site_associations_5667 mvi on cg.CG_ICN = mvi.MVIPersonICN"
+        "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date from CareGivers cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
         )
 
     Caregivers.write.format("delta").mode("overwrite").save("/mnt/Patronage/Caregivers_Staging")
@@ -111,14 +124,21 @@ CGRunUpdateTable = DeltaTable.forPath(spark, "/mnt/Patronage/CG_Run_History")
 CGUpdateRuns = spark.read.format("delta").load("/mnt/Patronage/CG_Run_History")
 CGUpdateRuns.createOrReplaceTempView('CGUpdateRuns_View')
 
+now = datetime.now()
+now_unix = datetime.timestamp(now)
+
 if status == 'rebuild':
-    process_start_time  = datetime.datetime(2023, 10, 28) 
-    unix_process_start_time = datetime.datetime.timestamp(process_start_time)*1000
+    process_start_time  = datetime(2023, 10, 28) 
+    unix_process_start_time = datetime.timestamp(process_start_time)*1000
 else:
     unix_process_start_time  = spark.sql('select modification_time from CGUpdateRuns_View order by modification_time desc limit 1').collect()[0][0] 
     
 files = dbutils.fs.ls('/mnt/ci-carma/landing')
 sorted_files = sorted(files, key=lambda x: x.modificationTime)
+
+# COMMAND ----------
+
+print(datetime.today().date())
 
 # COMMAND ----------
 
@@ -172,7 +192,7 @@ upsert_agg_df = spark.sql(
 upsert_agg_df.createOrReplaceTempView('upsert_agg_df')
 
 edipi_df = spark.sql(
-    "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date from upsert_agg_df cg left join person_site_associations_5667 mvi on cg.CG_ICN = mvi.MVIPersonICN"
+    "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
 )
 
 CGDeltaTable.alias("master").merge(
@@ -189,9 +209,9 @@ CGDeltaTable.alias("master").merge(
 # COMMAND ----------
 
 last_modification_time = sorted_files[-1].modificationTime
-date_today = datetime.datetime.now().date()
 number_of_upserts = len(files_to_process)
 upsert_rows = upsert_df.count()
+date_today = datetime.today().date()
 
 update_row = [
     Row(date_today, last_modification_time, number_of_upserts, upsert_rows)
