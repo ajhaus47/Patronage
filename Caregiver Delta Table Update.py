@@ -138,10 +138,6 @@ sorted_files = sorted(files, key=lambda x: x.modificationTime)
 
 # COMMAND ----------
 
-print(datetime.today().date())
-
-# COMMAND ----------
-
 files_to_process = []
 
 for file in files:
@@ -211,12 +207,13 @@ CGDeltaTable.alias("master").merge(
 last_modification_time = sorted_files[-1].modificationTime
 number_of_upserts = len(files_to_process)
 upsert_rows = upsert_df.count()
+deduped_upsert_rows = upsert_agg_df.count()
 date_today = datetime.today().date()
 
 update_row = [
-    Row(date_today, last_modification_time, number_of_upserts, upsert_rows)
+    Row(date_today, last_modification_time, number_of_upserts, upsert_rows, deduped_upsert_rows)
 ]
-update_columns = ["run_date", "modification_time", "number_of_upserts", "upsert_rows"]
+update_columns = ["run_date", "modification_time", "number_of_upserts", "upsert_rows", "deduped_upsert_rows"]
 
 update_df = spark.createDataFrame(update_row).toDF(*update_columns)
 
@@ -230,6 +227,6 @@ CGRunUpdateTable.alias("master").merge(update_df.alias("update"), "master.modifi
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC %sql
 # MAGIC
-# MAGIC Find out what to quarantine based off of EDIPI
+# MAGIC DESCRIBE HISTORY "/mnt/Patronage/Caregivers_Staging"
