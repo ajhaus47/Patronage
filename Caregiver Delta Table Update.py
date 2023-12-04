@@ -86,13 +86,14 @@ if DeltaTable.isDeltaTable(spark, "/mnt/Patronage/Caregivers_Staging") is False:
     .withColumn("Status_Last_Update", lit(None).cast("string"))\
     .withColumnRenamed("Dispositioned Date", "Status_Begin_Date")\
     .withColumnRenamed("Benefits End Date", "Status_Termination_Date")\
+    .withColumn('SDP_Event_Created_Timestamp', lit(datetime(2023, 10, 31, 0, 0, 0)))\
     .drop("Person ICN", "CARMA Case Details: Veteran ICN", "Caregiver Status", "Applicant Type")\
     .filter((col("Status_Termination_Date") >= current_date()) | (col("Status_Termination_Date").isNull()))
 
     df_CareGivers.createOrReplaceTempView("Caregivers")
 
     Caregivers = spark.sql(
-        "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date from CareGivers cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
+        "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.SDP_Event_Created_Timestamp from CareGivers cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
         )
 
     Caregivers.write.format("delta").mode("overwrite").save("/mnt/Patronage/Caregivers_Staging")
@@ -128,7 +129,7 @@ now = datetime.now()
 now_unix = datetime.timestamp(now)
 
 if status == 'rebuild':
-    process_start_time  = datetime(2023, 10, 28) 
+    process_start_time  = datetime(2023, 10, 31) 
     unix_process_start_time = datetime.timestamp(process_start_time)*1000
 else:
     unix_process_start_time  = spark.sql('select modification_time from CGUpdateRuns_View order by modification_time desc limit 1').collect()[0][0] 
@@ -183,12 +184,12 @@ upsert_df = (
 upsert_df.createOrReplaceTempView('upsert_df')
 
 upsert_agg_df = spark.sql(
-    "with window AS (select CG_ICN, Veteran_ICN, Batch_CD, SC_Combined_Disability_Percentage, PT_Indicator, Individual_Unemployability, Status_Last_Update, Status_Begin_Date, Status_Termination_Date, RANK() OVER (PARTITION BY CG_ICN, Veteran_ICN ORDER BY Event_Created_Date desc) as rank from upsert_df) select *, count(*) as count from window where rank = 1 group by all"
+    "with window AS (select CG_ICN, Veteran_ICN, Batch_CD, SC_Combined_Disability_Percentage, PT_Indicator, Individual_Unemployability, Status_Last_Update, Status_Begin_Date, Status_Termination_Date, Event_Created_Date, RANK() OVER (PARTITION BY CG_ICN, Veteran_ICN ORDER BY Event_Created_Date desc) as rank from upsert_df) select *, count(*) as count from window where rank = 1 group by all"
 )
 upsert_agg_df.createOrReplaceTempView('upsert_agg_df')
 
 edipi_df = spark.sql(
-    "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
+    "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.Event_Created_Date as SDP_Event_Created_Timestamp from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
 )
 
 CGDeltaTable.alias("master").merge(
