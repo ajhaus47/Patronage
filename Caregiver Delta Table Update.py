@@ -49,10 +49,16 @@ def pandas_to_spark(pandas_df):
 
 person_site_associations_5667 = (
     spark.read.parquet("/mnt/ci-mvi/Processed/SVeteran.SMVIPersonSiteAssociation/")
-    .filter(col("MVITreatingFacilityInstitutionSID") == 5667)
+    .filter(
+        (col("MVITreatingFacilityInstitutionSID") == 5667)
+        & (
+            (col("ActiveMergedIdentifierCode") == "A")
+            | col("ActiveMergedIdentifierCode").isNull()
+        )
+    )
     .select("EDIPI", "MVIPersonICN", "calc_IngestionTimestamp")
     .groupBy("EDIPI", "MVIPersonICN")
-    .agg(max("calc_IngestionTimestamp").alias('IngestionTimeStamp'))
+    .agg(max("calc_IngestionTimestamp").alias("IngestionTimeStamp"))
 )
 
 person_site_associations_5667.createOrReplaceTempView("person_site_associations_5667")
@@ -72,33 +78,46 @@ final_edipi.createOrReplaceTempView("final_edipi")
 # COMMAND ----------
 
 if DeltaTable.isDeltaTable(spark, "/mnt/Patronage/Caregivers_Staging") is False:
-    status = 'rebuild'
-    filePath = '/dbfs/FileStore/CGs31October2023.xlsx'
-    df = pd.read_excel(filePath,engine='openpyxl')
+    status = "rebuild"
+    filePath = "/dbfs/FileStore/CGs31October2023.xlsx"
+    df = pd.read_excel(filePath, engine="openpyxl")
 
-    df_CareGivers = pandas_to_spark(df)\
-    .withColumn("CG_ICN", col("Person ICN").substr(1,10))\
-    .withColumn("Veteran_ICN", col("CARMA Case Details: Veteran ICN").substr(1,10))\
-    .withColumn('Batch_CD',lit("CG"))\
-    .withColumn("SC_Combined_Disability_Percentage", lit(None).cast("int"))\
-    .withColumn("PT_Indicator", lit(None).cast("string"))\
-    .withColumn("Individual_Unemployability", lit(None).cast("string"))\
-    .withColumn("Status_Last_Update", lit(None).cast("string"))\
-    .withColumnRenamed("Dispositioned Date", "Status_Begin_Date")\
-    .withColumnRenamed("Benefits End Date", "Status_Termination_Date")\
-    .withColumn('SDP_Event_Created_Timestamp', lit(datetime(2023, 10, 31, 0, 0, 0)))\
-    .drop("Person ICN", "CARMA Case Details: Veteran ICN", "Caregiver Status", "Applicant Type")\
-    .filter((col("Status_Termination_Date") >= current_date()) | (col("Status_Termination_Date").isNull()))
+    df_CareGivers = (
+        pandas_to_spark(df)
+        .withColumn("CG_ICN", col("Person ICN").substr(1, 10))
+        .withColumn("Veteran_ICN", col("CARMA Case Details: Veteran ICN").substr(1, 10))
+        .withColumn("Batch_CD", lit("CG"))
+        .withColumn("SC_Combined_Disability_Percentage", lit(None).cast("int"))
+        .withColumn("PT_Indicator", lit(None).cast("string"))
+        .withColumn("Individual_Unemployability", lit(None).cast("string"))
+        .withColumn("Status_Last_Update", lit(None).cast("string"))
+        .withColumnRenamed("Dispositioned Date", "Status_Begin_Date")
+        .withColumnRenamed("Benefits End Date", "Status_Termination_Date")
+        .withColumn("SDP_Event_Created_Timestamp", lit(datetime(2023, 10, 31, 0, 0, 0)))
+        .drop(
+            "Person ICN",
+            "CARMA Case Details: Veteran ICN",
+            "Caregiver Status",
+            "Applicant Type",
+        )
+        .filter(
+            (col("Caregiver Status") == "Active")
+            | (col("Status_Termination_Date") >= current_date())
+            | (col("Status_Termination_Date").isNull())
+        )
+    )
 
     df_CareGivers.createOrReplaceTempView("Caregivers")
 
     Caregivers = spark.sql(
-        "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.SDP_Event_Created_Timestamp from CareGivers cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
-        )
+        "select mvi.EDIPI as EDIPI, CG_ICN as ICN, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.SDP_Event_Created_Timestamp from CareGivers cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
+    )
 
-    Caregivers.write.format("delta").mode("overwrite").save("/mnt/Patronage/Caregivers_Staging")
+    Caregivers.write.format("delta").mode("overwrite").save(
+        "/mnt/Patronage/Caregivers_Staging"
+    )
 else:
-    status = 'update'
+    status = "update"
     pass
 
 print(status)
@@ -150,7 +169,6 @@ for file in files:
 
 # COMMAND ----------
 
-
 upsert_df = (
     spark.read.csv(files_to_process, header=True, inferSchema=True)
     .select(
@@ -162,34 +180,37 @@ upsert_df = (
         "Veteran_ICN__c",
         "CreatedDate",
     )
-    .withColumn("CG_ICN" ,col("Caregiver_ICN__c").substr(1,10))
-    .withColumn("Veteran_ICN" ,col("Veteran_ICN__c").substr(1,10))
-    .withColumn('Batch_CD',lit("CG"))\
-    .withColumn("SC_Combined_Disability_Percentage", lit(None).cast("int"))\
-    .withColumn("PT_Indicator", lit(None).cast("string"))\
-    .withColumn("Individual_Unemployability", lit(None).cast("string"))\
-    .withColumn("Status_Last_Update", lit(None).cast("string"))\
+    .withColumn("CG_ICN", col("Caregiver_ICN__c").substr(1, 10))
+    .withColumn("Veteran_ICN", col("Veteran_ICN__c").substr(1, 10))
+    .withColumn("Batch_CD", lit("CG"))
+    .withColumn("SC_Combined_Disability_Percentage", lit(None).cast("int"))
+    .withColumn("PT_Indicator", lit(None).cast("string"))
+    .withColumn("Individual_Unemployability", lit(None).cast("string"))
+    .withColumn("Status_Last_Update", lit(None).cast("string"))
     .withColumnRenamed("Caregiver_Status__c", "Caregiver_Status")
     .withColumnRenamed("Dispositioned_Date__c", "Status_Begin_Date")
     .withColumnRenamed("Benefits_End_Date__c", "Status_Termination_Date")
     .withColumnRenamed("CreatedDate", "Event_Created_Date")
     .filter(
-        (col("Status_Termination_Date") >= current_date())
+        (col("Caregiver_Status") == "Active")
+        | (col("Status_Termination_Date") >= current_date())
         | (col("Status_Termination_Date").isNull())
     )
     .filter(col("Applicant_Type__c") == "Primary Caregiver")
-    .drop("Caregiver_ICN__c", "Veteran_ICN__c", "Applicant_Type__c", "Caregiver_Status__c")
+    .drop(
+        "Caregiver_ICN__c", "Veteran_ICN__c", "Applicant_Type__c", "Caregiver_Status__c"
+    )
 )
 
-upsert_df.createOrReplaceTempView('upsert_df')
+upsert_df.createOrReplaceTempView("upsert_df")
 
 upsert_agg_df = spark.sql(
     "with window AS (select CG_ICN, Veteran_ICN, Batch_CD, SC_Combined_Disability_Percentage, PT_Indicator, Individual_Unemployability, Status_Last_Update, Status_Begin_Date, Status_Termination_Date, Event_Created_Date, RANK() OVER (PARTITION BY CG_ICN, Veteran_ICN ORDER BY Event_Created_Date desc) as rank from upsert_df) select *, count(*) as count from window where rank = 1 group by all"
 )
-upsert_agg_df.createOrReplaceTempView('upsert_agg_df')
+upsert_agg_df.createOrReplaceTempView("upsert_agg_df")
 
 edipi_df = spark.sql(
-    "select mvi.EDIPI as EDIPI, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.Event_Created_Date as SDP_Event_Created_Timestamp from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
+    "select mvi.EDIPI as EDIPI, CG_ICN as ICN, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.Event_Created_Date as SDP_Event_Created_Timestamp from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
 )
 
 CGDeltaTable.alias("master").merge(
@@ -222,12 +243,4 @@ CGRunUpdateTable.alias("master").merge(update_df.alias("update"), "master.modifi
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC
-# MAGIC select * from CGUpdateRuns_View
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC
-# MAGIC DESCRIBE HISTORY "/mnt/Patronage/Caregivers_Staging"
+display(CGUpdateRuns)
