@@ -210,7 +210,7 @@ upsert_agg_df = spark.sql(
 upsert_agg_df.createOrReplaceTempView("upsert_agg_df")
 
 edipi_df = spark.sql(
-    "select mvi.EDIPI as EDIPI, CG_ICN as ICN, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.Status, cg.Event_Created_Date as SDP_Event_Created_Timestamp from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1"
+    "with window AS (select mvi.EDIPI as EDIPI, CG_ICN as ICN, cg.Batch_CD, cg.SC_Combined_Disability_Percentage, cg.PT_Indicator as PT_Indicator, cg.Individual_Unemployability, cg.Status_Begin_Date, cg.Status_Last_Update, cg.Status_Termination_Date, cg.Status, cg.Event_Created_Date as SDP_Event_Created_Timestamp, RANK() OVER (PARTITION BY EDIPI, CG_ICN ORDER BY cg.Event_Created_Date desc) as rank from upsert_agg_df cg left join final_edipi mvi on cg.CG_ICN = mvi.MVIPersonICN where mvi.rank = 1) select * from window where rank = 1"
 )
 
 CGDeltaTable.alias("master").merge(
