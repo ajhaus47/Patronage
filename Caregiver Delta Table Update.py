@@ -10,7 +10,7 @@ pip install openpyxl
 # COMMAND ----------
 
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime
 from delta.tables import *
 from pyspark.sql.types import *
 from pyspark.sql.functions import lit, col, current_timestamp, current_date, max

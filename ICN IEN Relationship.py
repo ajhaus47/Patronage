@@ -6,7 +6,9 @@ from pyspark.sql.window import Window
 # COMMAND ----------
 
 Window_Spec = Window.partitionBy(
-    "MVIPersonICN", "MVITreatingFacilityInstitutionSID"
+    "MVIPersonICN",
+    "MVITreatingFacilityInstitutionSID",
+    "TreatingFacilityPersonIdentifier",
 ).orderBy(desc("CorrelationModifiedDateTime"))
 
 person = (
@@ -29,7 +31,7 @@ person = (
         "Last_Modified",
         "rank",
     )
-    .filter(col('rank') == 1)
+    .filter(col("rank") == 1)
 )
 
 institution = spark.read.parquet("/mnt/ci-mvi/Raw/NDim.MVIInstitution/")
@@ -45,12 +47,37 @@ relationship_df = (
         institution["InstitutionCode"],
         institution["MVIInstitutionSID"],
         person["TreatingFacilityPersonIdentifier"],
-        person["Last_Modified"]
+        person["Last_Modified"],
     )
     .distinct()
 )
 
+duplicate_iens = (
+    relationship_df.groupBy("MVIPersonICN", "MVIInstitutionSID")
+    .count()
+    .filter(col("count") > 1)
+    .withColumnRenamed("MVIPersonICN", "ICN")
+    .withColumnRenamed("MVIInstitutionSID", "InstitutionSID")
+)
+
+unduped_relationship_df = relationship_df\
+    .join(duplicate_iens, (relationship_df["MVIPersonICN"] == duplicate_iens["ICN"]) & (relationship_df["MVIInstitutionSID"] == duplicate_iens["InstitutionSID"]), "left")\
+    .filter(col("count").isNull())\
+    .select(
+        relationship_df["MVIPersonICN"], 
+        relationship_df["InstitutionCode"],
+        relationship_df["MVIInstitutionSID"], 
+        relationship_df["TreatingFacilityPersonIdentifier"],
+        relationship_df["Last_Modified"]
+    )
+        
+
 relationship_df.createOrReplaceTempView("relationship_df")
+unduped_relationship_df.createOrReplaceTempView("unduped_relationship_df")
+
+# COMMAND ----------
+
+display(unduped_relationship_df)
 
 # COMMAND ----------
 
@@ -61,7 +88,7 @@ with 200CORP as (
     TreatingFacilityPersonIdentifier, 
     Last_Modified
   from
-    relationship_df
+    unduped_relationship_df
   where
     InstitutionCode = '200CORP'
 ),
@@ -71,7 +98,7 @@ with 200CORP as (
     TreatingFacilityPersonIdentifier,
     Last_Modified
   from
-    relationship_df
+    unduped_relationship_df
   where
     InstitutionCode = '200DOD'
 ),
@@ -81,7 +108,7 @@ with 200CORP as (
     TreatingFacilityPersonIdentifier,
     Last_Modified
   from
-    relationship_df
+    unduped_relationship_df
   where
     InstitutionCode = '200VETS'
 ),
@@ -104,6 +131,15 @@ icn_master.createOrReplaceTempView('icn_master')
 
 # COMMAND ----------
 
+display(icn_master)
+
+# COMMAND ----------
+
 icn_master.write.format("delta").mode("overwrite").save(
-        "/mnt/Patronage/ICN_Relationship"
+        "/mnt/Patronage/identity_correlations"
     )
+# write to ci-patronage (PUT Error)
+
+# COMMAND ----------
+
+
