@@ -1,8 +1,10 @@
 # Databricks notebook source
-from pyspark.sql.functions import col, lit, when
+from pyspark.sql.functions import col, lit, when, desc, rank, lpad
 from pyspark.sql.types import *
 from pyspark.sql import Row
 from datetime import datetime
+from delta.tables import *
+from pyspark.sql.window import Window
 
 # COMMAND ----------
 
@@ -90,13 +92,13 @@ pai = spark.read.csv("/FileStore/df/Disabled_Vets_12_14_2023.csv", schema=vba_sc
     .withColumnRenamed('COMBND_DEGREE_PCT', 'SC_Combined_Disability_Percentage')\
     .withColumnRenamed('PT_35_FLAG', 'PT_Indicator')
 
-icn_relationship = spark.read.format("delta").load("/mnt/Patronage/ICN_Relationship")\
+icn_relationship = spark.read.format("delta").load("/mnt/Patronage/identity_correlations")\
     .withColumnRenamed('MVIPersonICN', 'ICN')\
 
 scd_data = initial_seed\
 .join(icn_relationship, initial_seed.PTCPNT_VET_ID == icn_relationship.participant_id, "left")\
 .join(pai, initial_seed.PTCPNT_VET_ID == pai.PARTICIPANT_ID, "left")\
-.select(icn_relationship.edipi, icn_relationship.ICN, initial_seed.Batch_CD, pai.SC_Combined_Disability_Percentage, pai.PT_Indicator, initial_seed.Individual_Unemployability, initial_seed.Status_Begin_Date, initial_seed.Status_Last_Update, initial_seed.Status_Termination_Date, initial_seed.SDP_Event_Created_Timestamp)
+.select(icn_relationship.edipi, icn_relationship.ICN, initial_seed.Batch_CD, lpad(pai.SC_Combined_Disability_Percentage, 3, '0').alias('SC_Combined_Disability_Percentage'), pai.PT_Indicator, initial_seed.Individual_Unemployability, initial_seed.Status_Begin_Date, initial_seed.Status_Last_Update, initial_seed.Status_Termination_Date, initial_seed.SDP_Event_Created_Timestamp)
 
 # COMMAND ----------
 
@@ -118,39 +120,70 @@ scd_data.write.format("delta").mode("overwrite").save(
 
 # COMMAND ----------
 
+Window_Spec = Window.partitionBy("participant_id").orderBy(desc("DSBL_DTR_DT"))
+
 update_file = (
     spark.read.csv("/mnt/ci-vadir-shared/CPIDODIEX_202312_spool.csv", schema=scd_schema)
+    .withColumnRenamed("PTCPNT_ID", "participant_id")
+    .withColumn("rank", rank().over(Window_Spec))
     .withColumn("Batch_CD", lit("SCD"))
     .withColumnRenamed("CMBNED_DEGREE_DSBLTY", "SC_Combined_Disability_Percentage")
+    .withColumnRenamed("DSBL_TYP_CD", "PT_Indicator")
     .withColumn("Individual_Unemployability", lit(None).cast("string"))
     .withColumn("Status_Begin_Date", lit(None).cast("string"))
     .withColumnRenamed("DSBL_DTR_DT", "Status_Last_Update")
     .withColumn("Status_Termination_Date", lit(None).cast("string"))
     .withColumn("SDP_Event_Created_Timestamp", lit(datetime(2023, 12, 31, 0, 0, 0)))
+    .filter(col("rank") == 1)
+    .select("participant_id", "Batch_CD", "SC_Combined_Disability_Percentage", "PT_Indicator", "Individual_Unemployability", "Status_Begin_Date", "Status_Last_Update", "Status_Termination_Date", "SDP_Event_Created_Timestamp")
 )
 
-update_dataframe = update_file.join(
-    icn_relationship,
-    update_file.PTCPNT_ID == icn_relationship.participant_id,
-    "left",
-).select(
-    icn_relationship.edipi,
-    icn_relationship.ICN,
-    update_file.Batch_CD,
-    update_file.SC_Combined_Disability_Percentage,
-    update_file.Individual_Unemployability,
-    update_file.Status_Begin_Date,
-    update_file.Status_Last_Update,
-    update_file.Status_Termination_Date,
-    update_file.SDP_Event_Created_Timestamp,
+duplicate_participant_ids = (
+    update_file.groupBy("participant_id").count().filter(col("count") > 1).withColumnRenamed("participant_id", "pat_id").withColumnRenamed("count", "cnt")
 )
 
-# COMMAND ----------
 
-display(update_dataframe)
+update_dataframe = (
+    update_file.join(
+        icn_relationship,
+        update_file.participant_id == icn_relationship.participant_id,
+        "left",
+    )
+    .join(
+        duplicate_participant_ids,
+        update_file.participant_id == duplicate_participant_ids.pat_id,
+        "left",
+    )
+    .filter(col("cnt").isNull())
+    .select(
+        icn_relationship.edipi,
+        icn_relationship.ICN,
+        icn_relationship.participant_id,
+        update_file.Batch_CD,
+        lpad(update_file.SC_Combined_Disability_Percentage, 3, '0').alias('SC_Combined_Disability_Percentage'),
+        update_file.PT_Indicator,
+        update_file.Individual_Unemployability,
+        update_file.Status_Begin_Date,
+        update_file.Status_Last_Update,
+        update_file.Status_Termination_Date,
+        update_file.SDP_Event_Created_Timestamp,
+        duplicate_participant_ids.cnt
+    )
+)
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC
-# MAGIC Ask to see if disability percentage means pt indicator = Y
+# MAGIC ### Merge To Delta
+
+# COMMAND ----------
+
+SCDDeltaTable = DeltaTable.forPath(spark, "/mnt/Patronage/SCD_Staging")
+
+# COMMAND ----------
+
+SCDDeltaTable.alias("master").merge(
+    update_dataframe.alias("update"),
+    "master.edipi = update.edipi",
+).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
