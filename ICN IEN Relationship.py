@@ -7,30 +7,36 @@ from delta.tables import *
 
 # COMMAND ----------
 
-sorted_files = sorted(dbutils.fs.ls('/mnt/ci-mvi/Processed/SVeteran.SMVIPersonSiteAssociation/'), key=lambda x: x.modificationTime)
-latest_modification_time = sorted_files[-1].modificationTime
-date_today = datetime.today().date()
+sorted_files = sorted(
+    dbutils.fs.ls("/mnt/ci-mvi/Processed/SVeteran.SMVIPersonSiteAssociation/"),
+    key=lambda x: x.modificationTime,
+)
 
-ICUpdateRuns = spark.read.format("delta").load("/mnt/Patronage/Identity_Correlation_Run_History")
-ICUpdateRuns.createOrReplaceTempView('ICUpdateRuns_View')
+ICUpdateRuns = spark.read.format("delta").load(
+    "/mnt/Patronage/Identity_Correlation_Run_History"
+)
+
+ICUpdateRuns.createOrReplaceTempView("ICUpdateRuns_View")
 
 institution = spark.read.parquet("/mnt/ci-mvi/Raw/NDim.MVIInstitution/")
 
 Window_Spec = Window.partitionBy(
-        "MVIPersonICN",
-        "MVITreatingFacilityInstitutionSID",
-        "TreatingFacilityPersonIdentifier",
-    ).orderBy(desc("CorrelationModifiedDateTime"))
+    "MVIPersonICN",
+    "MVITreatingFacilityInstitutionSID",
+    "TreatingFacilityPersonIdentifier",
+).orderBy(desc("CorrelationModifiedDateTime"))
 
 # COMMAND ----------
 
+files_to_process = []
+
 if DeltaTable.isDeltaTable(spark, "/mnt/Patronage/identity_correlations") is False:
     status = "rebuild"
-    files_to_process = sorted_files
+    for file in sorted_files:
+        files_to_process.append(file.path)
 else:
     status = 'update'
     unix_process_start_time  = spark.sql('select latest_modification_time from ICUpdateRuns_View order by latest_modification_time desc limit 1').collect()[0][0] 
-    files_to_process = []
     for file in sorted_files:
         if file.modificationTime > unix_process_start_time:
             files_to_process.append(file.path)
@@ -133,13 +139,6 @@ unduped_relationship_df.createOrReplaceTempView("unduped_relationship_df")
 
 # COMMAND ----------
 
-columns = ["run_date", "number_of_buckets", "latest_modification_time"]
-data = [(date_today, len(files_to_process), latest_modification_time)]
-rdd = spark.sparkContext.parallelize(data)
-df = rdd.toDF(columns)
-
-# COMMAND ----------
-
 if status == 'rebuild':
 
     icn_master = spark.sql("""
@@ -198,27 +197,92 @@ else:
 
 # COMMAND ----------
 
-if status == 'update':
-    identity_correlations = spark.read.format("delta").load("/mnt/Patronage/identity_correlations")
+if status == "update":
+    identity_correlations = DeltaTable.forPath(
+        spark, "/mnt/Patronage/identity_correlations"
+    )
 
-    participant_id = unduped_relationship_df.filter(col("InstitutionCode") == '200CORP')
-    edipi = unduped_relationship_df.filter(col("InstitutionCode") == '200DOD')
-    va_profile_id = unduped_relationship_df.filter(col("InstitutionCode") == '200VETS')
+    participant_id = unduped_relationship_df.filter(col("InstitutionCode") == "200CORP")
+    edipi = unduped_relationship_df.filter(col("InstitutionCode") == "200DOD")
+    va_profile_id = unduped_relationship_df.filter(col("InstitutionCode") == "200VETS")
+
+    identity_correlations.alias("master").merge(
+        participant_id.alias("update"),
+        "master.MVIPersonICN = update.MVIPersonICN",
+    ).whenMatchedUpdate(
+        set={
+            "MVIPersonICN": "master.MVIPersonICN",
+            "participant_id": "update.TreatingFacilityPersonIdentifier",
+            "edipi": "master.edipi",
+            "va_profile_id": "master.va_profile_id",
+        }
+    ).whenNotMatchedInsert(
+        values={
+            "MVIPersonICN": "update.MVIPersonICN",
+            "participant_id": "update.TreatingFacilityPersonIdentifier",
+            "edipi": lit(None),
+            "va_profile_id": lit(None),
+        }
+    ).execute()
+
+    identity_correlations.alias("master").merge(
+        edipi.alias("update"),
+        "master.MVIPersonICN = update.MVIPersonICN",
+    ).whenMatchedUpdate(
+        set={
+            "MVIPersonICN": "master.MVIPersonICN",
+            "participant_id": "master.participant_id",
+            "edipi": "update.TreatingFacilityPersonIdentifier",
+            "va_profile_id": "master.va_profile_id",
+        }
+    ).whenNotMatchedInsert(
+        values={
+            "MVIPersonICN": "update.MVIPersonICN",
+            "participant_id": lit(None),
+            "edipi": "update.TreatingFacilityPersonIdentifier",
+            "va_profile_id": lit(None),
+        }
+    ).execute()
+
+    identity_correlations.alias("master").merge(
+        va_profile_id.alias("update"),
+        "master.MVIPersonICN = update.MVIPersonICN",
+    ).whenMatchedUpdate(
+        set={
+            "MVIPersonICN": "master.MVIPersonICN",
+            "participant_id": "master.participant_id",
+            "edipi": "master.edipi",
+            "va_profile_id": "update.TreatingFacilityPersonIdentifier",
+        }
+    ).whenNotMatchedInsert(
+        values={
+            "MVIPersonICN": "update.MVIPersonICN",
+            "participant_id": lit(None),
+            "edipi": lit(None),
+            "va_profile_id": "update.TreatingFacilityPersonIdentifier",
+        }
+    ).execute()
+    
 else:
     pass
+    print("pass")
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC
-# MAGIC select MVIPersonICN, InstitutionCode, count(*) from relationship_df group by 1, 2 order by 3 desc;
+identity_correlations = DeltaTable.forPath(
+        spark, "/mnt/Patronage/Identity_Correlation_Run_History"
+    )
 
-# COMMAND ----------
+latest_modification_time = sorted_files[-1].modificationTime
+number_of_buckets = len(files_to_process)
+date_today = datetime.today().date()
 
-# MAGIC %sql
-# MAGIC
-# MAGIC select * from relationship_df where MVIPersonICN = 1008856884 and InstitutionCode = '200CORP'
+update_row = [
+    Row(date_today, number_of_buckets, latest_modification_time)
+]
 
-# COMMAND ----------
+update_columns = ["run_date", "number_of_buckets", "latest_modification_time"]
 
-display(spark.read.format('delta').load("/mnt/Patronage/CG_Run_History"))
+update_run_df = spark.createDataFrame(update_row).toDF(*update_columns)
+
+identity_correlations.alias("master").merge(update_run_df.alias("update"), "master.run_date = update.run_date").whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
